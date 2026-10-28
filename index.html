@@ -1,0 +1,1089 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>水墨道士</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; height: 100%; width: 100%; overflow: hidden; background: #05070c; font-family: ui-sans-serif, system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  #stage { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+  canvas { display: block; touch-action: none; position: absolute; transform-origin: center center; }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="game"></canvas></div>
+<script>
+(() => {
+'use strict';
+
+// ===== 常量 =====
+const W = 1000, H = 620;
+const HUD_H = 64;
+const ROAD_TOP = 200, ROAD_BOT = 470;
+const LANES = 4;
+const LANE_H = (ROAD_BOT - ROAD_TOP) / LANES;
+const ARRAY_X = 58;
+const CARD_TOP = 504, CARD_H = 50, CARD_GAP = 6, CARD_X0 = 20;
+const CARD_W = (W - CARD_X0 * 2 - CARD_GAP * 7) / 8;
+
+const cvs = document.getElementById('game');
+const ctx = cvs.getContext('2d');
+
+// ============================================================
+// ===== 素材配置区 =====
+// ============================================================
+// 1. 道士配置
+const STAND_IMG_SRC = 'taoist.png'; // 站立图 (如果是jpg请改成 .jpg)
+const TAOIST_W = 180;               
+const TAOIST_H = 180;               
+const TAOIST_Y_OFF = 25;            
+const VIDEO_BG_TYPE = 'white';       // 'white'去白底, 'black'去黑底, 'none'无背景
+
+// 2. 道士施法序列帧（默认 6 张 c1.png ~ c6.png）
+const CAST_FRAME_COUNT = 6;    
+const CAST_DURATION = 2.5;     // 施法动作持续 1.5 秒
+let castFrames = [];
+let castLoaded = 0;
+
+for (let i = 1; i <= CAST_FRAME_COUNT; i++) {
+  const img = new Image();
+  img.src = 'c' + i + '.png'; // 如果是jpg请改成 .jpg
+  img.onload = () => { castLoaded++; };
+  castFrames.push(img);
+}
+
+let standImg = new Image();
+standImg.src = STAND_IMG_SRC;
+let castTimer = 0;
+
+// 3. 僵尸序列帧（你现在是 6 张 z1.jpg ~ z6.jpg）
+const ZOMBIE_FRAME_COUNT = 6;  // 改成 6 张
+const ZOMBIE_W = 90;   
+const ZOMBIE_H = 110;  
+const ZOMBIE_BG_TYPE = 'white'; 
+let zombieFrames = [];
+let zombieLoaded = 0;
+
+for (let i = 1; i <= ZOMBIE_FRAME_COUNT; i++) {
+  const img = new Image();
+  img.src = 'z' + i + '.jpg'; // 僵尸是 jpg 格式
+  img.onload = () => { zombieLoaded++; };
+  zombieFrames.push(img);
+}
+
+// ============================================================
+// ===== 背景图配置 =====
+// ============================================================
+const BG_IMAGE_SRC = 'bg.jpg'; 
+const MENU_BG_SRC = 'menu_bg.jpg'; 
+let bgLayer = null, bgReady = false;
+let menuBgLayer = null, menuBgReady = false;
+
+if (BG_IMAGE_SRC) {
+  const bgImg = new Image();
+  bgImg.onload = () => {
+    bgLayer = document.createElement('canvas');
+    bgLayer.width = W; bgLayer.height = H;
+    const c = bgLayer.getContext('2d');
+    const ir = bgImg.width / bgImg.height, dr = W / H;
+    let sx = 0, sy = 0, sw = bgImg.width, sh = bgImg.height;
+    if (ir > dr) { sw = bgImg.height * dr; sx = (bgImg.width - sw) / 2; }
+    else         { sh = bgImg.width / dr;  sy = (bgImg.height - sh) / 2; }
+    c.drawImage(bgImg, sx, sy, sw, sh, 0, 0, W, H);
+    c.fillStyle = 'rgba(6,10,20,0.6)'; 
+    c.fillRect(0, 0, W, H);
+    bgReady = true;
+  };
+  bgImg.src = BG_IMAGE_SRC;
+}
+
+if (MENU_BG_SRC) {
+  const mImg = new Image();
+  mImg.onload = () => {
+    menuBgLayer = document.createElement('canvas');
+    menuBgLayer.width = W; menuBgLayer.height = H;
+    const c = menuBgLayer.getContext('2d');
+    const ir = mImg.width / mImg.height, dr = W / H;
+    let sx = 0, sy = 0, sw = mImg.width, sh = mImg.height;
+    if (ir > dr) { sw = mImg.height * dr; sx = (mImg.width - sw) / 2; }
+    else         { sh = mImg.width / dr;  sy = (mImg.height - sh) / 2; }
+    c.drawImage(mImg, sx, sy, sw, sh, 0, 0, W, H);
+    menuBgReady = true;
+  };
+  mImg.src = MENU_BG_SRC;
+}
+
+// ===== 游戏其他常量 =====
+let _scale = 1;
+let _isRotated = false;
+
+const BTN_PAUSE = { x: 680, y: 14, w: 42, h: 36 };
+const BTN_SPEED = { x: 730, y: 14, w: 42, h: 36 };
+const BTN_SAVE  = { x: 780, y: 14, w: 42, h: 36 };
+const BTN_QUIT  = { x: 830, y: 14, w: 42, h: 36 };
+
+const SPEEDS = [1, 1.5, 2, 3];
+let speedMult = 1;
+
+const ELEM_COLOR = { metal:'#ffd76e', wood:'#7ee07a', water:'#5ec8ff', fire:'#ff7a4c', earth:'#c99a5b', wind:'#9de8d0', thunder:'#c08aff', time:'#ffd0f0', space:'#8ab4ff', none:'#a8b8a0', ice:'#9fe8ff' };
+const ELEM_NAME = { metal:'金', wood:'木', water:'水', fire:'火', earth:'土', wind:'风', thunder:'雷', time:'时', space:'空', none:'凡', ice:'冰' };
+const BEATS = { metal:'wood', wood:'earth', earth:'water', water:'fire', fire:'metal' };
+const GEN   = { metal:'water', water:'wood', wood:'fire', fire:'earth', earth:'metal' };
+
+const SPELLS = [
+  { id:'sword',   name:'铁剑下落', elem:'metal',   cost:40, cd:6,  kind:'target', icon:'sword', tag:'攻击' },
+  { id:'flying',  name:'飞剑',     elem:'metal',   cost:50, cd:9,  kind:'line',   icon:'flying', tag:'攻击' },
+  { id:'vine',    name:'藤蔓缠绕', elem:'wood',    cost:45, cd:8,  kind:'field',  icon:'vine', tag:'控制' },
+  { id:'pollen',  name:'花粉迷幻', elem:'wood',    cost:50, cd:12, kind:'field',  icon:'pollen', tag:'控制' },
+  { id:'rain',    name:'落雨',     elem:'water',   cost:40, cd:8,  kind:'field',  icon:'rain', tag:'减速' },
+  { id:'prison',  name:'水牢',     elem:'water',   cost:35, cd:6,  kind:'target', icon:'prison', tag:'控制' },
+  { id:'burn',    name:'灼烧',     elem:'fire',    cost:45, cd:7,  kind:'field',  icon:'burn', tag:'攻击' },
+  { id:'blast',   name:'爆裂',     elem:'fire',    cost:70, cd:12, kind:'place',  icon:'blast', tag:'攻击' },
+  { id:'wall',    name:'土墙',     elem:'earth',   cost:30, cd:5,  kind:'place',  icon:'wall', tag:'防御' },
+  { id:'pit',     name:'土坑',     elem:'earth',   cost:40, cd:8,  kind:'place',  icon:'pit', tag:'控制' },
+  { id:'gale',    name:'强风',     elem:'wind',    cost:35, cd:7,  kind:'line',   icon:'gale', tag:'击退' },
+  { id:'tornado', name:'龙卷风',   elem:'wind',    cost:65, cd:14, kind:'line',   icon:'tornado', tag:'变异' },
+  { id:'thunder', name:'落雷',     elem:'thunder', cost:60, cd:10, kind:'target', icon:'thunder', tag:'攻击' },
+  { id:'chain',   name:'电索',     elem:'thunder', cost:50, cd:9,  kind:'target', icon:'chain', tag:'弹射' },
+  { id:'rewind',  name:'时间回溯', elem:'time',    cost:70, cd:16, kind:'field',  icon:'rewind', tag:'控制' },
+  { id:'portal',  name:'空间回廊', elem:'space',   cost:60, cd:15, kind:'place',  icon:'portal', tag:'防御' },
+];
+
+const AURA_REACTIONS = {
+  'fire+water':   { name:'蒸发', color:'#bfe8ff', dmg: 120, dmgElem:'water', text:'蒸' },
+  'fire+wood':    { name:'爆燃', color:'#ff6a3c', dmg: 160, dmgElem:'fire', text:'燃' },
+  'water+wind':   { name:'冻结', color:'#9fe8ff', stun: 3.5, slow: 4, text:'冰' },
+  'wind+fire':    { name:'火龙卷', color:'#ff9a3c', dmg: 90, dmgElem:'fire', text:'炎' },
+  'thunder+water':{ name:'导电', color:'#a8d8ff', dmg: 100, dmgElem:'thunder', text:'电' },
+  'thunder+metal':{ name:'雷附', color:'#d0a8ff', burn: 4, text:'电' },
+  'earth+water':  { name:'泥沼', color:'#8a7a4a', slow: 5, text:'泥' },
+  'earth+fire':   { name:'岩浆', color:'#ff9a3c', dmg: 110, dmgElem:'fire', text:'岩' },
+  'time+any':     { name:'时滞', color:'#ffd0f0', stun: 4, text:'滞' },
+  'metal+wood':   { name:'斩击', color:'#ffd76e', dmg: 150, dmgElem:'metal', trueDmg: true, text:'斩' },
+  'wood+earth':   { name:'寄生', color:'#7ee07a', dmg: 80, stun: 4, defZero: 4, text:'寄' },
+  'metal+fire':   { name:'熔化', color:'#ff7a4c', dmg: 100, defDown: 3, text:'熔' },
+  'metal+wind':   { name:'刃暴', color:'#ffd76e', dmg: 80, dmgElem:'metal', trueDmg: true, text:'刃' },
+  'wood+wind':    { name:'叶暴', color:'#7ee07a', burn: 5, dmg: 60, dmgElem:'wood', text:'叶' },
+};
+
+const ZTYPE = {
+  normal:{ hp:110, speed:38, elem:'none',  color:'#8f9e86', dmg:12, r:13 },
+  metal: { hp:240, speed:26, elem:'metal', color:'#d8c98a', dmg:18, r:15 },
+  wood:  { hp:170, speed:36, elem:'wood',  color:'#7ac86a', dmg:14, r:14 },
+  water: { hp:150, speed:44, elem:'water', color:'#5ec8ff', dmg:13, r:13 },
+  fire:  { hp:140, speed:50, elem:'fire',  color:'#ff7a4c', dmg:16, r:13 },
+  earth: { hp:300, speed:22, elem:'earth', color:'#b88a4a', dmg:22, r:17 },
+  boss:  { hp:3600,speed:16, elem:'metal', color:'#b040d0', dmg:55, r:30 },
+};
+
+const WAVE_PLAN = [
+  { n:3,  types:['normal'] }, { n:4,  types:['normal','wood'] },
+  { n:5,  types:['normal','wood','water'] }, { n:6,  types:['metal','wood','water','fire'] },
+  { n:7,  types:['metal','wood','water','fire','earth'] }, { n:8,  types:['metal','wood','water','fire','earth'] },
+  { n:9,  types:['metal','wood','water','fire','earth'] }, { n:10, types:['metal','wood','water','fire','earth'] },
+  { n:1,  types:['boss'] },
+];
+
+let playerData = { gold: 0, arts: { qingjing: 1, xuangui: 1, tianlei: 1 } };
+try { const str = localStorage.getItem('taoist_player_data'); if (str) playerData = JSON.parse(str); } catch(e) {}
+function savePlayerData() { localStorage.setItem('taoist_player_data', JSON.stringify(playerData)); }
+
+let state = 'menu';
+let currentArt = '';
+let mana, manaMax, manaRegen, thunderBonus;
+let arrayHp, arrayHpMax;
+let wave, waveTimer, gameTime;
+let selected, cooldowns;
+let zombies, obstacles, fields, traps, projectiles, effects, toasts, spawnQueue, tornadoes;
+let mouse = { x: -1, y: -1, isDown: false };
+let dragIdx = -1;
+let shake = 0, kills = 0;
+
+function getArtBonus(id) {
+  const lv = playerData.arts[id] || 1;
+  if (id === 'qingjing') return 2.0 + lv * 1.5;
+  if (id === 'xuangui')  return 300 + lv * 400;
+  if (id === 'tianlei')  return 0.3 + lv * 0.2;
+  return 0;
+}
+function applyArt(id) {
+  currentArt = id;
+  if (id === 'qingjing') manaRegen += getArtBonus('qingjing');
+  if (id === 'xuangui')  { arrayHpMax += getArtBonus('xuangui'); arrayHp += getArtBonus('xuangui'); }
+  if (id === 'tianlei')  thunderBonus += getArtBonus('tianlei');
+}
+function rr(x, y, w, h, r) {
+  r = Math.min(r, Math.abs(w) / 2, Math.abs(h) / 2);
+  ctx.beginPath(); ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+function laneY(l) { return ROAD_TOP + (l + 0.5) * LANE_H; }
+function baseMult(atk, def) {
+  if (!def || def === 'none' || !BEATS[atk]) return 1;
+  if (atk === def) return 0.15;
+  if (BEATS[atk] === def) return 1.8;
+  if (BEATS[def] === atk) return 0.5;
+  if (GEN[atk] === def || GEN[def] === atk) return 0.5;
+  return 1;
+}
+function addToast(msg, color) { toasts.push({ msg, color: color || '#ffe8a0', life: 1.8, maxLife: 1.8 }); }
+function addText(x, y, text, color, size) { effects.push({ kind:'text', x, y, text, color: color || '#fff', size: size || 16, life: 0.8, maxLife: 0.8, vy: -46 }); }
+function addRing(x, y, color, r, life) { effects.push({ kind:'ring', x, y, color, r: r || 60, life: life || 0.45, maxLife: life || 0.45 }); }
+function addBurst(x, y, color, n, spread, size) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2, s = spread * (0.3 + Math.random());
+    effects.push({ kind:'particle', x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 40, color, size: size * (0.5 + Math.random()), life: 0.5 + Math.random() * 0.4, maxLife: 0.9 });
+  }
+}
+
+function saveGame() {
+  if (state !== 'playing' && state !== 'paused') return;
+  const data = { art: currentArt, wave, gameTime, mana, manaMax, manaRegen, thunderBonus, arrayHp, arrayHpMax, kills, waveTimer, zombies, obstacles, fields, traps, projectiles, spawnQueue };
+  try { localStorage.setItem('taoist_zombie_save', JSON.stringify(data)); addToast('进度已保存', '#a8f0a0'); } catch (e) { addToast('保存失败', '#ff8a8a'); }
+}
+function loadGame() {
+  const str = localStorage.getItem('taoist_zombie_save'); if (!str) return false;
+  try {
+    const data = JSON.parse(str);
+    state = 'playing'; currentArt = data.art; wave = data.wave; gameTime = data.gameTime; mana = data.mana; manaMax = data.manaMax; manaRegen = data.manaRegen; thunderBonus = data.thunderBonus;
+    arrayHp = data.arrayHp; arrayHpMax = data.arrayHpMax; kills = data.kills; waveTimer = data.waveTimer; zombies = data.zombies; obstacles = data.obstacles; fields = data.fields; traps = data.traps; projectiles = data.projectiles; spawnQueue = data.spawnQueue;
+    for (const z of zombies) { if (z.statusLock === undefined) z.statusLock = 0; if (z._lastLavaHit === undefined) z._lastLavaHit = -10; }
+    for (const o of obstacles) { if (o.lavaTimer === undefined) o.lavaTimer = 0; }
+    selected = -1; dragIdx = -1; speedMult = 1; effects = []; toasts = []; shake = 0; tornadoes = [];
+    cooldowns = SPELLS.map(() => 0); mouse = { x: -1, y: -1, isDown: false }; castTimer = 0;
+    addToast('读取存档成功', '#a8f0a0'); return true;
+  } catch (e) { return false; }
+}
+function resetGame() {
+  manaMax = 100; mana = 100; manaRegen = 5; thunderBonus = 1; arrayHpMax = 1000; arrayHp = 1000;
+  wave = 0; waveTimer = 3; gameTime = 0; selected = -1; dragIdx = -1; speedMult = 1; castTimer = 0;
+  cooldowns = SPELLS.map(() => 0); zombies = []; obstacles = []; fields = []; traps = []; projectiles = []; effects = []; toasts = []; spawnQueue = []; tornadoes = []; kills = 0; shake = 0;
+}
+function startFromMenu(artId) { resetGame(); applyArt(artId); state = 'playing'; addToast('功法已运转，镇守山门！', '#a8f0a0'); }
+function startWave(n) {
+  wave = n; const plan = WAVE_PLAN[n - 1]; if (!plan) return;
+  spawnQueue = []; let t = gameTime + 0.4;
+  for (let i = 0; i < plan.n; i++) {
+    spawnQueue.push({ t, type: plan.types[(Math.random() * plan.types.length) | 0] });
+    t += n === WAVE_PLAN.length ? 0 : (0.65 + Math.random() * 0.7);
+  }
+  if (n === WAVE_PLAN.length) { addToast('煞气冲天…… 千年尸王降临！', '#ff6b9a'); shake = 14; } else addToast(`第 ${n} 波来袭`, '#9fe8ff');
+}
+function spawnZombie(type) {
+  const t = ZTYPE[type]; const lane = (Math.random() * LANES) | 0;
+  zombies.push({
+    type, lane, x: W + 40 + Math.random() * 100, y: laneY(lane), hp: t.hp, maxHp: t.hp, speed: t.speed, elem: t.elem, color: t.color, dmg: t.dmg, r: t.r,
+    stun: 0, slow: 0, confuse: 0, burn: 0, burnDmg: 0, aura: null, auraTimer: 0, statusText: '', statusColor: '#fff', statusTimer: 0, statusLock: 0,
+    defZeroTimer: 0, defDownTimer: 0, hitFlash: 0, phase: Math.random() * Math.PI * 2, bossPhase: 0, dead: false, _lastLavaHit: -10,
+  });
+  addBurst(zombies[zombies.length - 1].x, zombies[zombies.length - 1].y, t.color, 6, 60, 4);
+}
+
+function dealDamage(z, amount, elem, trueDmg) {
+  if (z.dead) return;
+  let m = baseMult(elem, z.elem);
+  if (trueDmg && m < 1) m = 1;
+  if (z.defDownTimer > 0) m *= 1.3;
+  if (z.defZeroTimer > 0) m = Math.max(m, 1.0);
+  if (elem === 'thunder') m *= thunderBonus;
+  const dmg = amount * m; z.hp -= dmg; z.hitFlash = 0.14;
+  const color = m > 1.25 ? '#ffdd44' : m < 0.85 ? '#7a8ba8' : '#ffffff';
+  addText(z.x + (Math.random() - 0.5) * 16, z.y - 46, Math.round(dmg), color, m > 1.25 ? 20 : 15);
+  if (z.hp <= 0) {
+    z.dead = true; kills++;
+    if (z.type === 'boss') { playerData.gold += 100; mana = Math.min(manaMax, mana + 100); addText(z.x, z.y - 60, '+100 金币', '#ffd700', 22); addBurst(z.x, z.y - 10, '#ffd700', 40, 300, 8); state = 'win'; addToast('道法自然，尸王伏诛！', '#a8f0a0'); }
+    else if (z.elem !== 'none') { playerData.gold += 10; manaMax += 10; mana = Math.min(manaMax, mana + 20); addText(z.x, z.y - 60, '+10 金币 & 法力上限', '#ffd700', 16); addBurst(z.x, z.y - 10, '#ffd700', 20, 180, 6); }
+    else { mana = Math.min(manaMax, mana + 8); addText(z.x, z.y - 60, '+8 法力', '#7ad8ff', 14); addBurst(z.x, z.y - 10, z.color, 14, 150, 6); }
+    savePlayerData();
+  }
+}
+
+function findReaction(e1, e2) {
+  if (!e1 || !e2 || e1 === e2) return null;
+  if (e1 === 'time' || e2 === 'time') return AURA_REACTIONS['time+any'];
+  return AURA_REACTIONS[e1 + '+' + e2] || AURA_REACTIONS[e2 + '+' + e1] || null;
+}
+function triggerAuraReaction(z, r) {
+  addToast('连锁 · ' + r.name, r.color); addBurst(z.x, z.y - 20, r.color, 20, 180, 6);
+  z.statusText = r.text; z.statusColor = r.color; z.statusTimer = 4; z.statusLock = 0.8; z.aura = null; z.auraTimer = 0;
+  if (r.dmg) dealDamage(z, r.dmg, r.dmgElem, r.trueDmg);
+  if (r.stun) z.stun = Math.max(z.stun, r.stun);
+  if (r.slow) z.slow = Math.max(z.slow, r.slow);
+  if (r.burn) { z.burn = r.burn; z.burnDmg = 16; }
+  if (r.defZero) z.defZeroTimer = r.defZero;
+  if (r.defDown) z.defDownTimer = r.defDown;
+}
+function attachElement(z, elem) {
+  if (z.dead || !elem || elem === 'none') return null;
+  if (z.elem === elem) return null;
+  if (z.aura && z.aura !== elem) { const r = findReaction(z.aura, elem); if (r) { triggerAuraReaction(z, r); return r; } }
+  z.aura = elem; z.auraTimer = 6;
+  if (!z.statusLock || z.statusLock <= 0) { z.statusText = ELEM_NAME[elem]; z.statusColor = ELEM_COLOR[elem]; z.statusTimer = 6; }
+  return null;
+}
+function applyAuraAndDamage(z, amount, spellElem, trueDmg) { if (z.dead) return; attachElement(z, spellElem); if (amount > 0) dealDamage(z, amount, spellElem, trueDmg); }
+function nearestZombie(mx, my, range) {
+  let best = null, bd = Infinity;
+  for (const z of zombies) { if (z.dead) continue; const d = Math.hypot(z.x - mx, z.y - my); if (d < range && d < bd) { bd = d; best = z; } }
+  return best;
+}
+
+function castSpell(idx, mx, my) {
+  const sp = SPELLS[idx];
+  if (state !== 'playing' || mana < sp.cost || cooldowns[idx] > 0) return;
+  let tx = mx, targetZ = null;
+  if (sp.kind === 'target') {
+    targetZ = nearestZombie(mx, my, 150);
+    if (!targetZ) { addToast('范围内无目标，施法取消', '#ff8a8a'); return; }
+    tx = targetZ.x;
+  }
+  mana -= sp.cost; cooldowns[idx] = sp.cd; selected = -1; dragIdx = -1;
+  const spY = sp.kind === 'target' && targetZ ? targetZ.y : my;
+  executeSpell(sp, tx, spY, targetZ);
+  
+  if (castLoaded >= CAST_FRAME_COUNT) { castTimer = CAST_DURATION; }
+}
+
+function executeSpell(sp, x, y, targetZ) {
+  switch (sp.id) {
+    case 'sword': if (targetZ) { applyAuraAndDamage(targetZ, 95, 'metal', true); effects.push({ kind:'swordfall', x: targetZ.x, y: targetZ.y, life:0.4, maxLife:0.4 }); addBurst(targetZ.x, targetZ.y - 20, '#ffd76e', 10, 130, 5); } break;
+    case 'flying': projectiles.push({ kind:'flying', x, y, vx:-560, dir:-1, life:2.2, hit:new Set() }); break;
+    case 'vine': addField(x, 125, 'wood', 4.2); addRing(x, y, '#7ee07a', 68, 0.5); break;
+    case 'pollen': addField(x, 140, 'pollen', 5); addRing(x, y, '#a8e86a', 74, 0.5); addBurst(x, y, '#d8f0a0', 14, 90, 4); break;
+    case 'rain': addField(x, 160, 'water', 5.5); addRing(x, y, '#5ec8ff', 82, 0.5); break;
+    case 'prison': if (targetZ) { applyAuraAndDamage(targetZ, 30, 'water', false); targetZ.stun = Math.max(targetZ.stun, 5); effects.push({ kind:'prison', x: targetZ.x, y: targetZ.y, life:5, maxLife:5 }); addBurst(targetZ.x, targetZ.y, '#5ec8ff', 10, 80, 4); } break;
+    case 'burn': addField(x, 150, 'fire', 4.5); effects.push({ kind:'beam', x, y, color:'#ff7a4c', life:0.5, maxLife:0.5, dir:-1 }); break;
+    case 'blast': addRing(x, y, '#ff5c3c', 105, 0.5); addBurst(x, y, '#ff7a4c', 26, 260, 7); shake = Math.min(shake + 8, 14); for (const z of zombies) if (!z.dead && Math.hypot(z.x - x, z.y - y) < 105) applyAuraAndDamage(z, 150, 'fire', false); break;
+    case 'wall': obstacles.push({ x, hp: 260, maxHp: 260, w: 46, h: 96, kind:'wall', y, lavaTimer: 0 }); addBurst(x, y, '#c99a5b', 12, 80, 5); break;
+    case 'pit': traps.push({ kind:'pit', x, y, life: 14, dmgTick: 0 }); addBurst(x, y, '#a87a45', 10, 70, 5); break;
+    case 'gale': effects.push({ kind:'gale_beam', x: W, y: y, life:0.6, maxLife:0.6 }); for (const z of zombies) { if (!z.dead) { applyAuraAndDamage(z, 20, 'wind', false); z.x = Math.min(W + 100, z.x + 300); z.stun = Math.max(z.stun, 1.5); } } break;
+    case 'tornado': tornadoes.push({ x: 0, y: y, lane: Math.floor((y - ROAD_TOP) / LANE_H), speed: 300, life: 3, maxLife: 3, dmg: 15, type: 'normal', hitCd: new Map() }); break;
+    case 'thunder': if (targetZ) { applyAuraAndDamage(targetZ, 130, 'thunder', true); effects.push({ kind:'bolt', x: targetZ.x, y: targetZ.y, life:0.35, maxLife:0.35 }); addBurst(targetZ.x, targetZ.y - 20, '#c08aff', 16, 180, 6); shake = Math.min(shake + 5, 12); } break;
+    case 'chain': { if (!targetZ) break; let current = targetZ; let hitList = new Set([current]); let bounces = 4; let dmg = 55;
+      while (bounces > 0) { applyAuraAndDamage(current, dmg, 'thunder', false); dmg *= 0.85; let next = null, minD = Infinity;
+        for (const z of zombies) { if (!z.dead && !hitList.has(z)) { let d = Math.hypot(z.x - current.x, z.y - current.y); if (d < 300 && d < minD) { minD = d; next = z; } } }
+        if (!next) { for (const z of zombies) { if (!z.dead && z !== current) { let d = Math.hypot(z.x - current.x, z.y - current.y); if (d < 300 && d < minD) { minD = d; next = z; } } } }
+        if (next) { effects.push({ kind: 'chain_bolt', x1: current.x, y1: current.y - 15, x2: next.x, y2: next.y - 15, life: 0.3, maxLife: 0.3 }); current = next; hitList.add(current); bounces--; } else { break; } } break; }
+    case 'rewind': addField(x, 150, 'rewind', 0.6); for (const z of zombies) if (!z.dead && Math.abs(z.x - x) < 75) { z.x = Math.min(W + 80, z.x + 170); addBurst(z.x, z.y, '#ffd0f0', 8, 90, 4); applyAuraAndDamage(z, 0, 'time', false); } addRing(x, y, '#ffd0f0', 80, 0.6); break;
+    case 'portal': traps.push({ kind:'portal', x, y, life: 18 }); addRing(x, y, '#8ab4ff', 56, 0.6); break;
+  }
+}
+function addField(x, w, elem, dur) { fields.push({ x, w, elem, life: dur, maxLife: dur, tick: 0 }); }
+
+function update(dt) {
+  dt *= speedMult; gameTime += dt;
+  if (castTimer > 0) castTimer -= dt; 
+  if (shake > 0) shake = Math.max(0, shake - dt * 40);
+
+  for (let i = effects.length - 1; i >= 0; i--) {
+    const e = effects[i]; e.life -= dt;
+    if (e.kind === 'particle') { e.x += e.vx * dt; e.y += e.vy * dt; e.vy += 260 * dt; e.vx *= Math.pow(0.05, dt); }
+    else if (e.kind === 'text') { e.y += e.vy * dt; e.vy *= Math.pow(0.4, dt); }
+    if (e.life <= 0) effects.splice(i, 1);
+  }
+  for (let i = toasts.length - 1; i >= 0; i--) { toasts[i].life -= dt; if (toasts[i].life <= 0) toasts.splice(i, 1); }
+  mana = Math.min(manaMax, mana + manaRegen * dt);
+  for (let i = 0; i < cooldowns.length; i++) if (cooldowns[i] > 0) cooldowns[i] = Math.max(0, cooldowns[i] - dt);
+  if (selected >= 0 && mana < SPELLS[selected].cost) selected = -1;
+
+  if (wave === 0) { waveTimer -= dt; if (waveTimer <= 0) { startWave(1); waveTimer = 12; } }
+  else if (wave < WAVE_PLAN.length && spawnQueue.length === 0 && zombies.length === 0) { waveTimer -= dt; if (waveTimer <= 0) { startWave(wave + 1); waveTimer = 12; } }
+  while (spawnQueue.length && spawnQueue[0].t <= gameTime) spawnZombie(spawnQueue.shift().type);
+
+  for (let i = fields.length - 1; i >= 0; i--) {
+    const f = fields[i]; f.life -= dt; f.tick += dt;
+    const doTick = f.tick >= 0.35; if (doTick) f.tick = 0;
+    if (f.elem === 'fire') { for (const o of obstacles) { if (o.hp <= 0) continue; if (Math.abs(o.x - f.x) < f.w / 2 + o.w / 2) { if (o.kind !== 'lavaWall') { o.kind = 'lavaWall'; addToast('土墙熔岩化 · 灼烧', '#ff7a4c'); addBurst(o.x, o.y, '#ff7a4c', 16, 120, 5); } o.lavaTimer = 8; } } }
+    for (const z of zombies) {
+      if (z.dead || Math.abs(z.x - f.x) > f.w / 2) continue;
+      if (f.elem === 'water') { z.slow = Math.max(z.slow, 0.25); attachElement(z, 'water'); }
+      else if (f.elem === 'wood') { z.stun = Math.max(z.stun, 0.2); attachElement(z, 'wood'); }
+      else if (f.elem === 'pollen') { if (z.confuse <= 0) { z.confuse = 1.2; addBurst(z.x, z.y - 30, '#d8f0a0', 5, 50, 3); } attachElement(z, 'wood'); }
+      else if (f.elem === 'fire') { if (doTick) dealDamage(z, 22, 'fire', false); attachElement(z, 'fire'); }
+      else if (f.elem === 'lava' && doTick) { dealDamage(z, 34, 'fire', false); z.slow = 0.6; attachElement(z, 'fire'); }
+      else if (f.elem === 'thunder' && doTick) { dealDamage(z, 26, 'thunder', false); attachElement(z, 'thunder'); }
+      else if (f.elem === 'mud') { z.slow = Math.max(z.slow, 0.8); attachElement(z, 'earth'); }
+      else if (f.elem === 'rewind') z.x = Math.min(W + 80, z.x + 300 * dt);
+    }
+    if (f.life <= 0) fields.splice(i, 1);
+  }
+
+  for (let i = tornadoes.length - 1; i >= 0; i--) {
+    const t = tornadoes[i]; t.life -= dt; t.x += t.speed * dt;
+    if (t.x > W + 50 || t.life <= 0) { if (t.type === 'water') { for (const z of zombies) { if (!z.dead && z.lane === t.lane) { z.stun = Math.max(z.stun, 3); z.slow = Math.max(z.slow, 4); applyAuraAndDamage(z, 40, 'water', false); } } addToast('水龙卷 · 冰封', '#9fe8ff'); } tornadoes.splice(i, 1); continue; }
+    for (const z of zombies) {
+      if (z.dead || z.lane !== t.lane) continue;
+      if (Math.abs(z.x - t.x) < 50) {
+        if (t.type === 'normal') { if (z.aura === 'fire' || z.elem === 'fire') { t.type = 'fire'; t.dmg = 45; addToast('龙卷风变异 · 火龙卷', '#ff7a4c'); shake = Math.min(shake + 5, 10); } else if (z.aura === 'water' || z.elem === 'water') { t.type = 'water'; t.dmg = 10; t.speed *= 0.7; addToast('龙卷风变异 · 水龙卷', '#5ec8ff'); } }
+        const lastHit = t.hitCd.get(z) || 0;
+        if (gameTime - lastHit > 0.2) { t.hitCd.set(z, gameTime); const dmgElem = t.type === 'fire' ? 'fire' : t.type === 'water' ? 'water' : 'wind'; applyAuraAndDamage(z, t.dmg, dmgElem, false); z.x = Math.min(W + 60, z.x + 50); z.stun = Math.max(z.stun, 0.5); if (t.type === 'fire') { z.burn = Math.max(z.burn, 3); z.burnDmg = 20; } }
+      }
+    }
+  }
+
+  for (let i = obstacles.length - 1; i >= 0; i--) { const o = obstacles[i]; if (o.hp <= 0) { obstacles.splice(i, 1); continue; } if (o.kind === 'lavaWall') { o.lavaTimer -= dt; o.hp -= 10 * dt; if (o.lavaTimer <= 0 && o.hp > 0) { o.kind = 'wall'; addBurst(o.x, o.y, '#ff7a4c', 6, 60, 4); } } }
+  for (let i = traps.length - 1; i >= 0; i--) {
+    const t = traps[i]; t.life -= dt; if (t.life <= 0) { traps.splice(i, 1); continue; }
+    for (const z of zombies) {
+      if (z.dead || Math.abs(z.x - t.x) > 30) continue;
+      if (t.kind === 'pit') { z.stun = Math.max(z.stun, 1.6); z.slow = Math.max(z.slow, 1.2); attachElement(z, 'earth'); t.dmgTick += dt; if (t.dmgTick > 0.5) { t.dmgTick = 0; dealDamage(z, 18, 'earth', false); } }
+      else if (t.kind === 'portal' && z.x < t.x + 20 && z.x > t.x - 20) { z.x = W + 70; addBurst(t.x, t.y, '#8ab4ff', 14, 130, 5); t.life = Math.min(t.life, 0.6); }
+    }
+  }
+  for (let i = projectiles.length - 1; i >= 0; i--) {
+    const p = projectiles[i]; p.x += p.vx * dt; p.life -= dt;
+    for (const z of zombies) { if (z.dead || p.hit.has(z)) continue; if (Math.abs(z.x - p.x) < 28 && Math.abs(z.y - p.y) < 70) { p.hit.add(z); applyAuraAndDamage(z, 62, 'metal', false); addBurst(p.x, p.y, '#ffd76e', 6, 90, 4); } }
+    if (p.x < -40 && p.dir === -1) { p.dir = 1; p.vx = -p.vx; }
+    if (p.x > W + 40 && p.dir === 1) { p.dir = -1; p.vx = -p.vx; }
+    if (p.life <= 0) projectiles.splice(i, 1);
+  }
+
+  for (let i = 0; i < zombies.length; i++) {
+    const z = zombies[i]; if (z.dead) continue;
+    if (z.hitFlash > 0) z.hitFlash -= dt;
+    if (z.slow > 0) z.slow -= dt;
+    if (z.confuse > 0) z.confuse -= dt;
+    if (z.auraTimer > 0) { z.auraTimer -= dt; if (z.auraTimer <= 0) z.aura = null; }
+    if (z.statusTimer > 0) { z.statusTimer -= dt; if (z.statusTimer <= 0) z.statusText = ''; }
+    if (z.statusLock > 0) z.statusLock -= dt;
+    if (z.defZeroTimer > 0) z.defZeroTimer -= dt;
+    if (z.defDownTimer > 0) z.defDownTimer -= dt;
+    if (z.burn > 0) { z.burn -= dt; z.burnDmg -= dt; if (z.burnDmg <= 0) { z.burnDmg = 1; dealDamage(z, 9, 'thunder', false); } }
+
+    if (z.type === 'boss') { const frac = z.hp / z.maxHp; if (frac < 0.66 && z.bossPhase === 0) { z.bossPhase = 1; z.elem = 'fire'; addToast('尸王·火身', '#ff7a4c'); } if (frac < 0.33 && z.bossPhase === 1) { z.bossPhase = 2; z.elem = 'water'; addToast('尸王·水身', '#5ec8ff'); } }
+    if (z.stun > 0) { z.stun -= dt; continue; }
+
+    let blocked = false;
+    for (const o of obstacles) { if (o.hp <= 0) continue; if (Math.abs(o.x - z.x) < 34) { o.hp -= z.dmg * dt; blocked = true; if (o.kind === 'lavaWall') { if (z._lastLavaHit === undefined) z._lastLavaHit = -10; if (gameTime - z._lastLavaHit > 0.35) { z._lastLavaHit = gameTime; attachElement(z, 'fire'); dealDamage(z, 15, 'fire', false); addBurst(z.x, z.y - 10, '#ff7a4c', 4, 60, 4); } } if (Math.random() < dt * 6) addBurst(o.x, o.y, o.kind === 'lavaWall' ? '#ff7a4c' : '#c99a5b', 3, 40, 3); break; } }
+    if (blocked) continue;
+
+    if (z.x <= ARRAY_X + 34) { z.x = ARRAY_X + 34; arrayHp -= z.dmg * dt; if (Math.random() < dt * 5) addBurst(ARRAY_X + 30, z.y, '#ff6b6b', 3, 60, 3); if (arrayHp <= 0) { arrayHp = 0; state = 'lose'; addToast('阵法破碎……', '#ff6b6b'); return; } continue; }
+    let minX = -9999;
+    for (let j = 0; j < zombies.length; j++) { if (i !== j && !zombies[j].dead && zombies[j].lane === z.lane && zombies[j].x < z.x) { minX = Math.max(minX, zombies[j].x); } }
+    if (z.x - minX < 35) continue;
+    const dirSign = z.confuse > 0 ? 1 : -1;
+    z.x += dirSign * z.speed * (z.slow > 0 ? 0.45 : 1) * dt;
+  }
+  zombies = zombies.filter(z => !z.dead);
+}
+
+function render(t) {
+  if (state === 'menu') { drawMenu(); return; }
+  if (state === 'panel') { drawPanel(); return; }
+  if (state === 'select_art') { drawSelectArt(); return; }
+  if (state === 'win' || state === 'lose') { drawEnd(); return; }
+
+  ctx.save();
+  if (shake > 0.5) ctx.translate((Math.random() - 0.5) * shake, (Math.random() - 0.5) * shake);
+
+  drawBackground(t);
+  drawArray(t);
+  drawTaoist(t);
+  drawFields();
+  drawTraps(t);
+  drawObstacles();
+
+  const sorted = [...zombies].sort((a, b) => a.y - b.y);
+  for (const z of sorted) drawZombie(z, t);
+
+  drawEffects(t);
+  if (dragIdx >= 0) drawDragPreview();
+  ctx.restore();
+
+  if (state === 'playing' || state === 'paused') { drawHUD(t); drawCards(t); if (state === 'paused') drawPauseOverlay(); }
+  drawToasts();
+}
+
+function drawBackground(t) {
+  if (bgReady) {
+    ctx.drawImage(bgLayer, 0, 0, W, H);
+  } else {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#131a2b'); g.addColorStop(0.5, '#0d1220'); g.addColorStop(1, '#070a12');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  }
+  ctx.strokeStyle = 'rgba(120,140,200,.12)'; ctx.lineWidth = 1;
+  for (let i = 1; i < LANES; i++) { const y = ROAD_TOP + i * LANE_H; ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+}
+
+// ============================================================
+// ===== 核心：绘制主角 =====
+// ============================================================
+function drawTaoist(t) {
+  const cx = ARRAY_X, cy = (ROAD_TOP + ROAD_BOT) / 2;
+  const breathe = Math.sin(t * 1.8) * 1.5; 
+
+  ctx.save();
+  ctx.translate(cx, cy + breathe + TAOIST_Y_OFF);
+  
+  const glow = ctx.createRadialGradient(0, -TAOIST_H/2, 10, 0, -TAOIST_H/2, TAOIST_W);
+  glow.addColorStop(0, 'rgba(160, 220, 255, 0.45)');
+  glow.addColorStop(1, 'rgba(160, 220, 255, 0)');
+  ctx.fillStyle = glow;
+  ctx.beginPath(); 
+  ctx.arc(0, -TAOIST_H/2 + 20, TAOIST_W, 0, Math.PI*2); 
+  ctx.fill();
+
+  if (VIDEO_BG_TYPE === 'white') { ctx.globalCompositeOperation = 'multiply'; } 
+  else if (VIDEO_BG_TYPE === 'black') { ctx.globalCompositeOperation = 'screen'; }
+
+  ctx.filter = 'brightness(2.2) contrast(1.1)';
+
+  if (castTimer > 0 && castLoaded >= CAST_FRAME_COUNT) {
+    const progress = 1 - (castTimer / CAST_DURATION);
+    let frameIndex = Math.floor(progress * CAST_FRAME_COUNT);
+    if (frameIndex >= CAST_FRAME_COUNT) frameIndex = CAST_FRAME_COUNT - 1;
+    
+    const frame = castFrames[frameIndex];
+    if (frame && frame.complete) {
+      ctx.drawImage(frame, -TAOIST_W/2, 30 - TAOIST_H, TAOIST_W, TAOIST_H);
+    }
+  } 
+  else if (standImg.complete && standImg.naturalWidth > 0) {
+    ctx.drawImage(standImg, -TAOIST_W/2, 30 - TAOIST_H, TAOIST_W, TAOIST_H);
+  } 
+  else {
+    ctx.fillStyle = '#5ec8ff'; ctx.beginPath(); ctx.arc(0, -30, 20, 0, Math.PI*2); ctx.fill();
+  }
+  
+  ctx.filter = 'none';
+  ctx.restore();
+}
+
+function drawArray(t) {
+  const cx = ARRAY_X, cy = (ROAD_TOP + ROAD_BOT) / 2;
+  const frac = Math.max(0, arrayHp / arrayHpMax);
+  ctx.save(); ctx.translate(cx, cy);
+  const g = ctx.createRadialGradient(0, 0, 10, 0, 0, 80);
+  g.addColorStop(0, `rgba(110, 220, 255, ${0.28 * frac + 0.08})`);
+  g.addColorStop(1, 'rgba(110, 220, 255, 0)');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, 80, 0, Math.PI * 2); ctx.fill();
+  ctx.rotate(t * 0.35);
+  ctx.strokeStyle = `rgba(140, 220, 255, ${0.4 + 0.3 * frac})`; ctx.lineWidth = 2.5;
+  for (let i = 0; i < 3; i++) { ctx.beginPath(); ctx.arc(0, 0, 28 + i * 8, 0, Math.PI * 2); ctx.stroke(); }
+  ctx.beginPath();
+  for (let i = 0; i < 6; i++) { const a = (i / 6) * Math.PI * 2; ctx.moveTo(Math.cos(a) * 26, Math.sin(a) * 26); ctx.lineTo(Math.cos(a + Math.PI / 3) * 44, Math.sin(a + Math.PI / 3) * 44); }
+  ctx.stroke(); ctx.restore();
+  const bw = 90, bh = 8, bx = cx - bw / 2, by = cy - 86;
+  ctx.fillStyle = 'rgba(0,0,0,.5)'; rr(bx, by, bw, bh, 4); ctx.fill();
+  ctx.fillStyle = frac > 0.5 ? '#5ee08a' : frac > 0.25 ? '#ffd93b' : '#ff5c5c';
+  rr(bx, by, bw * frac, bh, 4); ctx.fill();
+}
+
+// ============================================================
+// ===== 核心：绘制僵尸（已放慢跳跃速度，适配 6 张 jpg） =====
+// ============================================================
+function drawZombie(z, t) {
+  const isBoss = z.type === 'boss';
+  const s = isBoss ? 1.5 : 1.0;
+  
+  const jumpHeight = 15; 
+  const speed = 4;       // 👈 已调慢：跳跃频率
+  const jumpY = -Math.abs(Math.sin(t * speed + z.phase)) * jumpHeight;
+  const hitX = z.hitFlash > 0 ? (Math.random() - 0.5) * 6 : 0;
+
+  ctx.save(); 
+  ctx.translate(z.x + hitX, z.y + jumpY); 
+  ctx.scale(s, s);
+
+  const shadowScale = 1 - (Math.abs(jumpY) / jumpHeight) * 0.5;
+  ctx.fillStyle = 'rgba(0,0,0,.45)'; 
+  ctx.beginPath(); 
+  ctx.ellipse(0, -jumpY, 20 * shadowScale, 7 * shadowScale, 0, 0, Math.PI * 2); 
+  ctx.fill();
+
+  if (ZOMBIE_BG_TYPE === 'white') { ctx.globalCompositeOperation = 'multiply'; } 
+  else if (ZOMBIE_BG_TYPE === 'black') { ctx.globalCompositeOperation = 'screen'; }
+
+  ctx.filter = 'brightness(1.5) contrast(1.1)';
+
+  if (zombieLoaded >= ZOMBIE_FRAME_COUNT) {
+    // 👈 已调慢：图片切换速度 (t * 5 表示每秒切换5次)
+    const frameIndex = Math.floor(t * 5 + z.phase) % ZOMBIE_FRAME_COUNT; 
+    const currentFrame = zombieFrames[frameIndex];
+    
+    if (currentFrame && currentFrame.complete) {
+      if (z.elem === 'water') ctx.filter += ' hue-rotate(180deg)';
+      else if (z.elem === 'fire') ctx.filter += ' sepia(1) saturate(3) hue-rotate(330deg)';
+      else if (z.elem === 'metal') ctx.filter += ' grayscale(0.5) brightness(1.2)';
+      else if (z.elem === 'wood') ctx.filter += ' hue-rotate(90deg)';
+      else if (z.elem === 'earth') ctx.filter += ' sepia(0.5)';
+
+      ctx.drawImage(currentFrame, -ZOMBIE_W/2, 20 - ZOMBIE_H, ZOMBIE_W, ZOMBIE_H);
+      
+      if (z.hitFlash > 0) { 
+        ctx.globalAlpha = (z.hitFlash / 0.14) * 0.6; 
+        ctx.fillStyle = '#fff'; 
+        ctx.fillRect(-ZOMBIE_W/2, 20 - ZOMBIE_H, ZOMBIE_W, ZOMBIE_H); 
+        ctx.globalAlpha = 1; 
+      }
+    }
+  } else {
+    ctx.fillStyle = '#333'; 
+    ctx.fillRect(-15, -30, 30, 40);
+  }
+  
+  if (z.statusText === '冰') { 
+    ctx.globalAlpha = 0.5;
+    ctx.fillStyle = 'rgba(140, 230, 255, 0.35)'; 
+    ctx.fillRect(-ZOMBIE_W/2, 20 - ZOMBIE_H, ZOMBIE_W, ZOMBIE_H); 
+    ctx.globalAlpha = 1;
+  }
+
+  ctx.filter = 'none';
+  ctx.restore();
+
+  const bw = isBoss ? 100 : 46; 
+  const bx = z.x - bw / 2; 
+  const by = z.y - (isBoss ? 95 : 60); 
+
+  if (z.elem && z.elem !== 'none') { 
+    const lx = z.x - (isBoss ? 62 : 35); const ly = by + (isBoss ? 4 : 2.5); 
+    ctx.fillStyle = 'rgba(0,0,0,.65)'; ctx.beginPath(); ctx.arc(lx, ly, 9, 0, Math.PI * 2); ctx.fill(); 
+    ctx.strokeStyle = ELEM_COLOR[z.elem]; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(lx, ly, 9, 0, Math.PI * 2); ctx.stroke(); 
+    ctx.fillStyle = ELEM_COLOR[z.elem]; ctx.font = 'bold 11px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; 
+    ctx.fillText(ELEM_NAME[z.elem], lx, ly + 0.5); ctx.textBaseline = 'alphabetic'; 
+  }
+  
+  if (z.statusTimer > 0 && z.statusText) { 
+    const tw = 24, th = 18; ctx.fillStyle = 'rgba(0,0,0,0.8)'; rr(z.x - tw/2, by - 30, tw, th, 6); ctx.fill(); 
+    ctx.strokeStyle = z.statusColor; ctx.lineWidth = 2; rr(z.x - tw/2, by - 30, tw, th, 6); ctx.stroke(); 
+    ctx.fillStyle = z.statusColor; ctx.font = 'bold 13px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; 
+    ctx.fillText(z.statusText, z.x, by - 20); ctx.textBaseline = 'alphabetic'; 
+  }
+  
+  if (z.hp < z.maxHp && z.hp > 0) { 
+    const frac = Math.max(0, z.hp / z.maxHp); ctx.fillStyle = 'rgba(0,0,0,.6)'; rr(bx, by, bw, isBoss ? 8 : 5, 3); ctx.fill(); 
+    ctx.fillStyle = frac > 0.5 ? '#6ee06e' : frac > 0.25 ? '#ffd93b' : '#ff5c5c'; rr(bx, by, bw * frac, isBoss ? 8 : 5, 3); ctx.fill(); 
+  }
+}
+
+function drawFields() {
+  for (const f of fields) {
+    const a = Math.min(1, f.life / 0.5) * 0.5;
+    let c = ELEM_COLOR[f.elem] || '#fff';
+    if (f.elem === 'pollen') c = '#a8e86a'; if (f.elem === 'lava') c = '#ff9a3c';
+    if (f.elem === 'mud') c = '#8a7a4a'; if (f.elem === 'rewind') c = '#ffd0f0';
+    ctx.globalAlpha = a * 0.55; ctx.fillStyle = c; rr(f.x - f.w / 2, ROAD_TOP + 10, f.w, ROAD_BOT - ROAD_TOP - 20, 16); ctx.fill();
+    ctx.globalAlpha = a * 0.9; ctx.strokeStyle = c; ctx.lineWidth = 2; ctx.setLineDash([8, 8]); ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1;
+  }
+}
+function drawTraps(t) {
+  for (const tr of traps) {
+    ctx.save();
+    if (tr.kind === 'pit') { ctx.fillStyle = 'rgba(20,14,8,.85)'; ctx.beginPath(); ctx.ellipse(tr.x, tr.y + 14, 34, 14, 0, 0, Math.PI * 2); ctx.fill(); ctx.strokeStyle = '#a87a45'; ctx.lineWidth = 3; ctx.stroke(); }
+    else if (tr.kind === 'portal') { ctx.translate(tr.x, tr.y); ctx.rotate(t * 2); for (let i = 0; i < 3; i++) { ctx.strokeStyle = `rgba(138,180,255,${0.7 - i * 0.18})`; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(0, 0, 14 + i * 9, i * 1.2, i * 1.2 + Math.PI * 1.3); ctx.stroke(); } }
+    ctx.restore(); ctx.globalAlpha = 1;
+  }
+}
+function drawObstacles() {
+  const now = performance.now();
+  for (const o of obstacles) {
+    if (o.hp <= 0) continue;
+    const frac = o.hp / o.maxHp;
+    ctx.save();
+    if (o.kind === 'lavaWall') {
+      const pulse = 0.5 + 0.5 * Math.sin(now / 200); ctx.shadowColor = '#ff7a4c'; ctx.shadowBlur = 14 + pulse * 12; ctx.fillStyle = '#8a3a1a'; rr(o.x - o.w / 2, o.y - o.h / 2, o.w, o.h, 8); ctx.fill(); ctx.shadowBlur = 0;
+      ctx.globalAlpha = 0.7 + 0.3 * frac; ctx.fillStyle = '#ff7a4c';
+      for (let i = 0; i < 5; i++) { const py = o.y - o.h/2 + 12 + (i * 16 + now / 40) % (o.h - 20); const px = o.x - o.w/2 + 8 + (i % 3) * 12; ctx.beginPath(); ctx.arc(px, py, 2.5 + pulse * 1.5, 0, Math.PI * 2); ctx.fill(); }
+      ctx.globalAlpha = 0.85; ctx.fillStyle = '#ffcc80'; rr(o.x - o.w/2 + 6, o.y - o.h/2 + 6, 6, 3, 1); ctx.fill(); rr(o.x + o.w/2 - 14, o.y + o.h/2 - 10, 6, 3, 1); ctx.fill();
+    } else { ctx.globalAlpha = 0.55 + 0.45 * frac; ctx.fillStyle = '#a87a45'; rr(o.x - o.w / 2, o.y - o.h / 2, o.w, o.h, 8); ctx.fill(); ctx.fillStyle = '#c99a5b'; rr(o.x - o.w / 2 + 3, o.y - o.h / 2 + 3, o.w - 6, o.h - 6, 6); ctx.fill(); }
+    ctx.restore(); ctx.globalAlpha = 1;
+  }
+}
+function drawEffects(t) {
+  for (const e of effects) {
+    const a = Math.max(0, e.life / e.maxLife); ctx.globalAlpha = a;
+    if (e.kind === 'particle') { ctx.fillStyle = e.color; ctx.beginPath(); ctx.arc(e.x, e.y, e.size * a, 0, Math.PI*2); ctx.fill(); }
+    else if (e.kind === 'text') { ctx.fillStyle = e.color; ctx.font = `bold ${e.size}px system-ui`; ctx.textAlign='center'; ctx.fillText(e.text, e.x, e.y); }
+    else if (e.kind === 'chain_bolt') { ctx.strokeStyle = '#c08aff'; ctx.lineWidth = 3; ctx.shadowColor = '#c08aff'; ctx.shadowBlur = 15; ctx.beginPath(); ctx.moveTo(e.x1, e.y1); for(let i=1; i<4; i++) { let tt = i/4; ctx.lineTo(e.x1 + (e.x2 - e.x1)*tt + (Math.random()-0.5)*20, e.y1 + (e.y2 - e.y1)*tt + (Math.random()-0.5)*20); } ctx.lineTo(e.x2, e.y2); ctx.stroke(); ctx.shadowBlur = 0; }
+    else if (e.kind === 'gale_beam') { const g = ctx.createLinearGradient(e.x, e.y, 0, e.y); g.addColorStop(0, 'rgba(157,232,208,0)'); g.addColorStop(0.5, 'rgba(157,232,208,0.6)'); g.addColorStop(1, 'rgba(157,232,208,0.9)'); ctx.fillStyle = g; ctx.fillRect(0, e.y - 60, e.x, 120); }
+    else if (e.kind === 'swordfall') { ctx.strokeStyle = '#ffd76e'; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(e.x, e.y - 130 * (1 - a) - 20); ctx.lineTo(e.x, e.y - 20); ctx.stroke(); ctx.fillStyle = '#fff2b0'; ctx.beginPath(); ctx.moveTo(e.x, e.y - 8); ctx.lineTo(e.x - 8, e.y - 26); ctx.lineTo(e.x + 8, e.y - 26); ctx.closePath(); ctx.fill(); }
+    else if (e.kind === 'bolt') { ctx.strokeStyle = '#c08aff'; ctx.lineWidth = 5; ctx.shadowColor = '#c08aff'; ctx.shadowBlur = 20; ctx.beginPath(); ctx.moveTo(e.x + (Math.random()-0.5)*20, 0); let yy = 0; while (yy < e.y - 20) { yy += 26; ctx.lineTo(e.x + (Math.random()-0.5)*42, yy); } ctx.lineTo(e.x, e.y - 20); ctx.stroke(); ctx.shadowBlur = 0; }
+    else if (e.kind === 'prison') { ctx.strokeStyle = '#5ec8ff'; ctx.lineWidth = 3; ctx.beginPath(); ctx.ellipse(e.x, e.y, 24, 46, 0, 0, Math.PI * 2); ctx.stroke(); }
+    ctx.globalAlpha = 1;
+  }
+  for (const tr of tornadoes) { const c = tr.type === 'fire' ? '#ff7a4c' : tr.type === 'water' ? '#5ec8ff' : '#9de8d0'; ctx.save(); ctx.translate(tr.x, tr.y); for (let i = 0; i < 5; i++) { ctx.strokeStyle = c; ctx.globalAlpha = 0.6 - i*0.1; ctx.lineWidth = 4; ctx.beginPath(); ctx.ellipse(0, -i * 10 + 20, 20 + i * 12, 8 + i * 6, t * 8 + i, 0, Math.PI * 1.7); ctx.stroke(); } ctx.restore(); ctx.globalAlpha = 1; }
+}
+function drawDragPreview() {
+  if (mouse.x < 0 || mouse.y < HUD_H) return;
+  const sp = SPELLS[dragIdx]; ctx.save(); ctx.globalAlpha = 0.6;
+  if (sp.kind === 'target') { const z = nearestZombie(mouse.x, mouse.y, 150); if (z) { ctx.strokeStyle = ELEM_COLOR[sp.elem]; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(z.x, z.y - 10, 42, 0, Math.PI * 2); ctx.stroke(); } else { ctx.strokeStyle = '#ff8a8a'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(mouse.x, mouse.y, 20, 0, Math.PI * 2); ctx.stroke(); } }
+  else if (sp.kind === 'field' || sp.kind === 'place') { ctx.strokeStyle = ELEM_COLOR[sp.elem]; ctx.lineWidth = 2; ctx.setLineDash([6,6]); ctx.beginPath(); ctx.arc(mouse.x, mouse.y, 35, 0, Math.PI*2); ctx.stroke(); ctx.setLineDash([]); if (sp.kind === 'field') { const w = sp.id === 'rain' ? 160 : sp.id === 'burn' ? 150 : 130; ctx.fillStyle = ELEM_COLOR[sp.elem]; ctx.globalAlpha = 0.12; rr(mouse.x - w/2, ROAD_TOP + 10, w, ROAD_BOT - ROAD_TOP - 20, 16); ctx.fill(); } }
+  else if (sp.kind === 'line') { const laneYpos = ROAD_TOP + (Math.floor((mouse.y - ROAD_TOP) / LANE_H) + 0.5) * LANE_H; ctx.strokeStyle = ELEM_COLOR[sp.elem]; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(0, laneYpos); ctx.lineTo(W, laneYpos); ctx.stroke(); }
+  ctx.restore();
+  const r = { w: 80, h: 40, x: mouse.x - 40, y: mouse.y - 50 }; ctx.fillStyle = '#2a3a5c'; rr(r.x, r.y, r.w, r.h, 8); ctx.fill(); ctx.strokeStyle = ELEM_COLOR[sp.elem]; ctx.lineWidth = 2; ctx.stroke(); ctx.fillStyle = '#fff'; ctx.font = 'bold 12px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(sp.name, r.x + r.w/2, r.y + r.h/2); ctx.textBaseline = 'alphabetic';
+}
+
+function drawHUD(t) {
+  const g = ctx.createLinearGradient(0, 0, 0, HUD_H); g.addColorStop(0, 'rgba(20,26,42,.95)'); g.addColorStop(1, 'rgba(12,16,28,.85)'); ctx.fillStyle = g; ctx.fillRect(0, 0, W, HUD_H);
+  ctx.fillStyle = '#7ad8ff'; ctx.font = 'bold 14px system-ui'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.fillText(`法力 ${Math.floor(mana)}/${manaMax}`, 20, 32);
+  ctx.fillStyle = '#ffd700'; ctx.font = 'bold 14px system-ui'; ctx.fillText(`💰 ${playerData.gold}`, 200, 32);
+  ctx.textAlign = 'center'; ctx.fillStyle = '#9fb8e0'; ctx.font = 'bold 16px system-ui'; ctx.fillText(wave === 0 ? '准备中' : `第 ${wave} / ${WAVE_PLAN.length} 波`, W / 2, 32);
+  drawButton(BTN_PAUSE, state === 'paused', state === 'paused' ? '▶' : '⏸'); drawButton(BTN_SPEED, speedMult !== 1, speedMult + 'x', '#ffd93b'); drawButton(BTN_SAVE, false, '💾', '#7ad8ff'); drawButton(BTN_QUIT, false, '⏻', '#ff7a7a');
+  ctx.textBaseline = 'alphabetic';
+}
+function drawButton(b, active, label, color) {
+  ctx.fillStyle = active ? 'rgba(90,180,255,.28)' : 'rgba(40,55,85,.7)'; rr(b.x, b.y, b.w, b.h, 8); ctx.fill(); ctx.strokeStyle = active ? 'rgba(140,200,255,.85)' : 'rgba(100,130,180,.4)'; ctx.lineWidth = 1.5; rr(b.x + 0.5, b.y + 0.5, b.w - 1, b.h - 1, 8); ctx.stroke(); ctx.fillStyle = active ? (color || '#e8f4ff') : '#9fb4d8'; ctx.font = 'bold 14px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(label, b.x + b.w / 2, b.y + b.h / 2 + 1); ctx.textBaseline = 'alphabetic';
+}
+function cardRect(i) { return { x: CARD_X0 + (i%8)*(CARD_W+CARD_GAP), y: CARD_TOP + ((i/8)|0)*(CARD_H+CARD_GAP), w: CARD_W, h: CARD_H }; }
+function drawCards(t) {
+  for (let i = 0; i < SPELLS.length; i++) {
+    const sp = SPELLS[i]; const r = cardRect(i); const affordable = mana >= sp.cost && cooldowns[i] <= 0; const isDragging = dragIdx === i;
+    if (isDragging) ctx.globalAlpha = 0.3;
+    ctx.fillStyle = '#1a2236'; rr(r.x, r.y, r.w, r.h, 8); ctx.fill(); ctx.strokeStyle = affordable ? 'rgba(120,160,255,.35)' : 'rgba(80,90,120,.3)'; ctx.lineWidth = 1.2; rr(r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1, 8); ctx.stroke();
+    ctx.fillStyle = ELEM_COLOR[sp.elem]; ctx.globalAlpha = affordable ? 0.85 : 0.3; rr(r.x + 6, r.y + 6, 4, r.h - 12, 2); ctx.fill(); ctx.globalAlpha = affordable ? 1 : 0.4;
+    ctx.fillStyle = ELEM_COLOR[sp.elem]; ctx.font = '14px system-ui'; ctx.textAlign = 'center'; ctx.fillText(sp.icon === 'sword' ? '🗡️' : sp.icon === 'thunder' ? '⚡' : sp.icon === 'chain' ? '🔗' : sp.icon === 'tornado' ? '🌪️' : '✨', r.x + 24, r.y + 30);
+    ctx.fillStyle = affordable ? '#dfe9ff' : '#6a7898'; ctx.font = 'bold 11px system-ui'; ctx.textAlign = 'left'; ctx.fillText(sp.name, r.x + 38, r.y + 20);
+    ctx.fillStyle = affordable ? '#7ad8ff' : '#5a6888'; ctx.font = 'bold 12px system-ui'; ctx.fillText(sp.cost, r.x + 38, r.y + 38);
+    ctx.globalAlpha = 1;
+    if (cooldowns[i] > 0) { const f = cooldowns[i] / sp.cd; ctx.save(); rr(r.x, r.y, r.w, r.h, 8); ctx.clip(); ctx.fillStyle = 'rgba(8,12,22,.75)'; ctx.fillRect(r.x, r.y + r.h * (1 - f), r.w, r.h * f); ctx.restore(); ctx.fillStyle = '#9fb8e0'; ctx.font = 'bold 13px system-ui'; ctx.textAlign = 'center'; ctx.fillText(Math.ceil(cooldowns[i]), r.x + r.w / 2, r.y + r.h / 2 + 4); }
+  }
+}
+function drawToasts() {
+  let y = 100;
+  for (const t of toasts) { ctx.globalAlpha = Math.min(1, t.life / 0.4); ctx.fillStyle = t.color; ctx.font = 'bold 20px system-ui'; ctx.textAlign = 'center'; ctx.shadowColor = 'rgba(0,0,0,.8)'; ctx.shadowBlur = 8; ctx.fillText(t.msg, W / 2, y); ctx.shadowBlur = 0; y += 30; ctx.globalAlpha = 1; }
+}
+function drawPauseOverlay() { ctx.fillStyle = 'rgba(5,8,14,.55)'; ctx.fillRect(0, HUD_H, W, H - HUD_H); ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#e8f4ff'; ctx.font = 'bold 36px system-ui'; ctx.fillText('已暂停', W / 2, H / 2 - 10); }
+
+// ============================================================
+// ===== 水墨 UI 菜单 =====
+// ============================================================
+function drawMenuBg(alpha) { 
+  if (menuBgReady) {
+    ctx.drawImage(menuBgLayer, 0, 0, W, H); 
+  } else if (bgReady) {
+    ctx.drawImage(bgLayer, 0, 0, W, H); 
+  }
+  ctx.fillStyle = 'rgba(5,8,14,' + alpha + ')'; 
+  ctx.fillRect(0, 0, W, H); 
+}
+
+function drawMenu() {
+  drawMenuBg(0.9);
+  
+  ctx.textAlign = 'center'; 
+  ctx.textBaseline = 'middle'; 
+  ctx.fillStyle = '#dfe9ff'; 
+  ctx.font = 'bold 80px "KaiTi", "楷体", serif';
+  
+  const title = '水墨道士';
+  for (let i = 0; i < title.length; i++) {
+    ctx.fillText(title[i], W - 150, 120 + i * 90);
+  }
+
+  ctx.fillStyle = 'rgba(200, 30, 30, 0.9)';
+  rr(W - 190, 480, 80, 80, 8); ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 48px "KaiTi", "楷体", serif';
+  ctx.fillText('道', W - 150, 520);
+
+  ctx.fillStyle = '#ffd700'; 
+  ctx.font = 'bold 24px "KaiTi", "楷体", serif'; 
+  ctx.fillText(`💰 香火钱: ${playerData.gold}`, W - 150, 600);
+
+  const btns = [
+    { text: '开始斩妖', action: 'select_art' }, 
+    { text: '修炼功法', action: 'panel' }, 
+    { text: '重返旧梦', action: 'load' }
+  ];
+  
+  const btnW = 260, btnH = 70, gap = 40, x0 = 150, y0 = 200;
+  
+  for (let i = 0; i < btns.length; i++) {
+    const x = x0, y = y0 + i * (btnH + gap);
+    const hover = mouse.x > x && mouse.x < x + btnW && mouse.y > y && mouse.y < y + btnH;
+    
+    ctx.fillStyle = hover ? 'rgba(40, 60, 90, 0.95)' : 'rgba(20, 28, 45, 0.85)';
+    rr(x, y, btnW, btnH, 4); ctx.fill();
+    
+    ctx.strokeStyle = hover ? '#5ec8ff' : 'rgba(160, 180, 210, 0.4)'; 
+    ctx.lineWidth = hover ? 3 : 1.5; 
+    rr(x, y, btnW, btnH, 4); ctx.stroke();
+    
+    ctx.fillStyle = hover ? '#c99a5b' : '#5a4a3a';
+    rr(x - 10, y - 5, 10, btnH + 10, 3); ctx.fill();
+    rr(x + btnW, y - 5, 10, btnH + 10, 3); ctx.fill();
+
+    ctx.fillStyle = hover ? '#ffffff' : '#9fb4d8'; 
+    ctx.font = hover ? 'bold 32px "KaiTi", "楷体", serif' : 'bold 28px "KaiTi", "楷体", serif'; 
+    ctx.fillText(btns[i].text, x + btnW / 2, y + btnH / 2 + 4);
+  }
+  
+  ctx.textAlign = 'left';
+  ctx.fillStyle = 'rgba(160, 180, 210, 0.5)'; 
+  ctx.font = '18px "KaiTi", "楷体", serif'; 
+  ctx.fillText('鼠标拖拽卡牌释放道法', 50, H - 100);
+  ctx.fillText('僵尸破阵则道消身陨', 50, H - 70);
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawPanel() {
+  drawMenuBg(0.9);
+  
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; 
+  ctx.fillStyle = '#dfe9ff'; ctx.font = 'bold 50px "KaiTi", "楷体", serif'; 
+  ctx.fillText('道 法 修 炼', W / 2, 80);
+  
+  ctx.fillStyle = '#ffd700'; ctx.font = 'bold 24px "KaiTi", "楷体", serif'; 
+  ctx.fillText(`当前香火钱: ${playerData.gold}`, W / 2, 140);
+
+  const arts = [
+    { id: 'qingjing', name: '清静经', color: '#5ec8ff', desc: '法力生生不息' }, 
+    { id: 'xuangui', name: '玄龟诀', color: '#7ee07a', desc: '阵法坚如磐石' }, 
+    { id: 'tianlei', name: '天雷诀', color: '#c08aff', desc: '雷法毁天灭地' }
+  ];
+  
+  const cw = 260, ch = 320, gap = 50, totalW = arts.length * cw + (arts.length - 1) * gap, x0 = (W - totalW) / 2;
+  
+  for (let i = 0; i < arts.length; i++) {
+    const a = arts[i], lv = playerData.arts[a.id] || 1, cost = lv === 1 ? 50 : lv === 2 ? 150 : lv === 3 ? 300 : 600, maxed = lv >= 5; 
+    const x = x0 + i * (cw + gap), y = 200;
+    
+    ctx.save();
+    ctx.translate(x + cw/2, y + 80);
+    ctx.rotate(Math.PI / 4);
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.beginPath(); ctx.arc(0, 0, 80, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = a.color; ctx.lineWidth = 3; 
+    ctx.beginPath(); ctx.arc(0, 0, 80, 0, Math.PI*2); ctx.stroke();
+    ctx.beginPath(); ctx.arc(0, 0, 70, 0, Math.PI*2); ctx.stroke();
+    ctx.restore();
+
+    ctx.fillStyle = a.color; ctx.font = 'bold 32px "KaiTi", "楷体", serif'; 
+    ctx.fillText(a.name, x + cw / 2, y + 80);
+    ctx.fillStyle = '#dfe9ff'; ctx.font = '20px "KaiTi", "楷体", serif'; 
+    ctx.fillText(`第 ${lv} 重`, x + cw / 2, y + 130);
+    
+    ctx.fillStyle = 'rgba(160, 180, 210, 0.8)'; ctx.font = '16px "KaiTi", "楷体", serif'; 
+    ctx.fillText(a.desc, x + cw / 2, y + 190);
+
+    const by = y + 240;
+    if (maxed) { 
+      ctx.fillStyle = '#8fa8d0'; ctx.font = 'bold 24px "KaiTi", "楷体", serif'; 
+      ctx.fillText('已臻化境', x + cw / 2, by + 20); 
+    } else {
+      const canBuy = playerData.gold >= cost; 
+      
+      ctx.fillStyle = canBuy ? 'rgba(220, 180, 80, 0.9)' : 'rgba(80, 80, 80, 0.6)'; 
+      rr(x + 30, by, cw - 60, 50, 6); ctx.fill(); 
+      
+      ctx.strokeStyle = canBuy ? '#b03030' : '#444'; 
+      ctx.lineWidth = 3; 
+      rr(x + 30, by, cw - 60, 50, 6); ctx.stroke(); 
+      
+      ctx.fillStyle = canBuy ? '#4a1a10' : '#888'; 
+      ctx.font = 'bold 20px "KaiTi", "楷体", serif'; 
+      ctx.fillText(`消耗 ${cost} 升级`, x + cw / 2, by + 25); 
+    }
+  }
+  
+  const bx = W / 2 - 100, by = 550; 
+  const hover = mouse.x > bx && mouse.x < bx + 200 && mouse.y > by && mouse.y < by + 50;
+  ctx.fillStyle = hover ? 'rgba(40, 60, 90, 0.9)' : 'rgba(20, 28, 45, 0.8)'; 
+  rr(bx, by, 200, 50, 25); ctx.fill(); 
+  ctx.strokeStyle = hover ? '#5ec8ff' : '#4a5c6e'; 
+  ctx.lineWidth = 2; ctx.stroke(); 
+  
+  ctx.fillStyle = hover ? '#fff' : '#9fb4d8'; 
+  ctx.font = 'bold 22px "KaiTi", "楷体", serif'; 
+  ctx.fillText('返回山门', W / 2, by + 25);
+  
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawSelectArt() {
+  drawMenuBg(0.9);
+  
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; 
+  ctx.fillStyle = '#dfe9ff'; ctx.font = 'bold 50px "KaiTi", "楷体", serif'; 
+  ctx.fillText('请 选 择 功 法', W / 2, 100);
+  
+  const arts = [
+    { id: 'qingjing', name: '清静经', color: '#5ec8ff' }, 
+    { id: 'xuangui', name: '玄龟诀', color: '#7ee07a' }, 
+    { id: 'tianlei', name: '天雷诀', color: '#c08aff' }
+  ];
+  
+  const cw = 240, ch = 200, gap = 40, totalW = arts.length * cw + (arts.length - 1) * gap, x0 = (W - totalW) / 2;
+  
+  for (let i = 0; i < arts.length; i++) {
+    const a = arts[i], lv = playerData.arts[a.id] || 1; 
+    const x = x0 + i * (cw + gap), y = 220;
+    const hover = mouse.x > x && mouse.x < x + cw && mouse.y > y && mouse.y < y + ch;
+    
+    ctx.save();
+    ctx.translate(x + cw/2, y + ch/2);
+    ctx.scale(hover ? 1.05 : 1, hover ? 1.05 : 1);
+    
+    ctx.fillStyle = hover ? 'rgba(40, 60, 90, 0.95)' : 'rgba(20, 28, 45, 0.85)'; 
+    rr(-cw/2, -ch/2, cw, ch, 12); ctx.fill(); 
+    
+    ctx.strokeStyle = hover ? a.color : 'rgba(160, 180, 210, 0.3)'; 
+    ctx.lineWidth = hover ? 4 : 2; 
+    rr(-cw/2, -ch/2, cw, ch, 12); ctx.stroke();
+    
+    ctx.fillStyle = hover ? a.color : '#dfe9ff'; 
+    ctx.font = 'bold 36px "KaiTi", "楷体", serif'; 
+    ctx.fillText(a.name, 0, -30);
+    
+    ctx.fillStyle = '#ffd700'; 
+    ctx.font = 'bold 20px "KaiTi", "楷体", serif'; 
+    ctx.fillText(`已修至 Lv.${lv}`, 0, 40);
+    
+    ctx.restore();
+  }
+  
+  const bx = W / 2 - 100, by = 520; 
+  const hover = mouse.x > bx && mouse.x < bx + 200 && mouse.y > by && mouse.y < by + 50;
+  ctx.fillStyle = hover ? 'rgba(80, 30, 30, 0.9)' : 'rgba(30, 20, 20, 0.8)'; 
+  rr(bx, by, 200, 50, 25); ctx.fill(); 
+  ctx.strokeStyle = '#ff7a7a'; ctx.lineWidth = 2; ctx.stroke(); 
+  
+  ctx.fillStyle = '#ff7a7a'; 
+  ctx.font = 'bold 22px "KaiTi", "楷体", serif'; 
+  ctx.fillText('打道回府', W / 2, by + 25);
+  
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawEnd() {
+  drawMenuBg(0.85);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  
+  if (state === 'win') { 
+    ctx.fillStyle = '#a8f0a0'; 
+    ctx.font = 'bold 80px "KaiTi", "楷体", serif'; 
+    ctx.fillText('道法自然', W / 2, H / 2 - 80); 
+    
+    ctx.fillStyle = '#dfe9ff'; 
+    ctx.font = '28px "KaiTi", "楷体", serif'; 
+    ctx.fillText('尸王伏诛，山门无恙', W / 2, H / 2 - 10); 
+  } else { 
+    ctx.fillStyle = '#ff7a7a'; 
+    ctx.font = 'bold 80px "KaiTi", "楷体", serif'; 
+    ctx.fillText('阵法破碎', W / 2, H / 2 - 80); 
+    
+    ctx.fillStyle = '#dfe9ff'; 
+    ctx.font = '28px "KaiTi", "楷体", serif'; 
+    ctx.fillText('僵尸冲破了山门……', W / 2, H / 2 - 10); 
+  }
+  
+  ctx.fillStyle = '#9fb4d8'; 
+  ctx.font = '24px "KaiTi", "楷体", serif'; 
+  ctx.fillText(`坚持到第 ${wave} 波　斩杀 ${kills} 只妖孽`, W / 2, H / 2 + 60);
+  
+  ctx.fillStyle = '#ffd700'; 
+  ctx.font = 'bold 30px "KaiTi", "楷体", serif'; 
+  ctx.fillText(`本局获得香火钱: 💰 ${playerData.gold}`, W / 2, H / 2 + 120);
+  
+  const alpha = 0.5 + Math.sin(performance.now() / 300) * 0.5;
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = '#ffd93b'; 
+  ctx.font = 'bold 24px "KaiTi", "楷体", serif'; 
+  ctx.fillText('点击任意处返回 / R 键', W / 2, H / 2 + 200);
+  ctx.globalAlpha = 1;
+  
+  ctx.textBaseline = 'alphabetic';
+}
+
+// ============================================================
+// ===== 输入与系统适配 =====
+// ============================================================
+function resize() {
+  const vw = window.innerWidth; const vh = window.innerHeight; const dpr = Math.min(window.devicePixelRatio || 1, 2); _isRotated = vh > vw; let cssW, cssH, scale;
+  if (_isRotated) { scale = Math.min(vh / W, vw / H); cssW = W * scale; cssH = H * scale; cvs.style.transform = 'rotate(90deg)'; } else { scale = Math.min(vw / W, vh / H); cssW = W * scale; cssH = H * scale; cvs.style.transform = 'rotate(0deg)'; }
+  if (scale <= 0 || !isFinite(scale)) scale = 0.5;
+  cvs.style.width = cssW + 'px'; cvs.style.height = cssH + 'px'; cvs.width = Math.round(cssW * dpr); cvs.height = Math.round(cssH * dpr); ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0); _scale = scale;
+}
+function toLocal(e) {
+  const r = cvs.getBoundingClientRect(); const cx = r.left + r.width / 2; const cy = r.top + r.height / 2; const dx = e.clientX - cx; const dy = e.clientY - cy; resize();
+  if (_isRotated) return { x: W / 2 + dy / _scale, y: H / 2 - dx / _scale }; return { x: W / 2 + dx / _scale, y: H / 2 + dy / _scale };
+}
+
+cvs.addEventListener('contextmenu', e => { e.preventDefault(); selected = -1; dragIdx = -1; });
+cvs.addEventListener('pointerdown', e => {
+  e.preventDefault(); const p = toLocal(e); mouse = { x: p.x, y: p.y, isDown: true };
+  
+  if (state === 'playing' || state === 'paused') {
+    if (p.x >= BTN_PAUSE.x-10 && p.x <= BTN_PAUSE.x+BTN_PAUSE.w+10 && p.y >= 4 && p.y <= 54) { state = state === 'playing' ? 'paused' : 'playing'; return; }
+    if (p.x >= BTN_SPEED.x-10 && p.x <= BTN_SPEED.x+BTN_SPEED.w+10 && p.y >= 4 && p.y <= 54) { speedMult = SPEEDS[(SPEEDS.indexOf(speedMult)+1)%SPEEDS.length]; return; }
+    if (p.x >= BTN_SAVE.x-10 && p.x <= BTN_SAVE.x+BTN_SAVE.w+10 && p.y >= 4 && p.y <= 54) { saveGame(); return; }
+    if (p.x >= BTN_QUIT.x-10 && p.x <= BTN_QUIT.x+BTN_QUIT.w+10 && p.y >= 4 && p.y <= 54) { state = 'menu'; return; }
+  }
+  
+  if (state === 'menu') {
+    const btnW = 260, btnH = 70, gap = 40, x0 = 150, y0 = 200;
+    for (let i = 0; i < 3; i++) { 
+      const x = x0, y = y0 + i * (btnH + gap); 
+      if (p.x > x - 20 && p.x < x + btnW + 20 && p.y > y - 20 && p.y < y + btnH + 20) { 
+        if (i === 0) state = 'select_art'; 
+        if (i === 1) state = 'panel'; 
+        if (i === 2) { if (localStorage.getItem('taoist_zombie_save')) loadGame(); else addToast('暂无存档', '#ff8a8a'); } 
+        return; 
+      } 
+    }
+    return;
+  }
+  
+  if (state === 'panel') {
+    const arts = ['qingjing', 'xuangui', 'tianlei']; const cw = 260, ch = 320, gap = 50, totalW = 3 * cw + 2 * gap, x0 = (W - totalW) / 2;
+    for (let i = 0; i < 3; i++) { 
+      const a = arts[i], lv = playerData.arts[a] || 1, cost = lv === 1 ? 50 : lv === 2 ? 150 : lv === 3 ? 300 : 600; 
+      if (lv >= 5) continue; 
+      const x = x0 + i * (cw + gap), y = 200, by = y + 240; 
+      if (p.x > x + 30 && p.x < x + cw - 30 && p.y > by && p.y < by + 50) { 
+        if (playerData.gold >= cost) { playerData.gold -= cost; playerData.arts[a]++; savePlayerData(); addToast('升级成功！', '#a8f0a0'); } 
+        else addToast('香火钱不足', '#ff8a8a'); 
+        return; 
+      } 
+    }
+    const bx = W / 2 - 100, by = 550; 
+    if (p.x > bx && p.x < bx + 200 && p.y > by && p.y < by + 50) { state = 'menu'; return; }
+    return;
+  }
+  
+  if (state === 'select_art') {
+    const arts = ['qingjing', 'xuangui', 'tianlei']; const cw = 240, ch = 200, gap = 40, totalW = 3 * cw + 2 * gap, x0 = (W - totalW) / 2;
+    for (let i = 0; i < 3; i++) { 
+      const x = x0 + i * (cw + gap), y = 220; 
+      if (p.x > x && p.x < x + cw && p.y > y && p.y < y + ch) { startFromMenu(arts[i]); return; } 
+    }
+    const bx = W / 2 - 100, by = 520; 
+    if (p.x > bx && p.x < bx + 200 && p.y > by && p.y < by + 50) { state = 'menu'; return; }
+    return;
+  }
+  
+  if (state === 'win' || state === 'lose') { state = 'menu'; return; }
+  if (state === 'paused') { state = 'playing'; last = performance.now(); return; }
+  if (state === 'playing') { if (p.y >= CARD_TOP) { for (let i=0; i<SPELLS.length; i++) { const r = cardRect(i); if (p.x >= r.x && p.x <= r.x+r.w && p.y >= r.y && p.y <= r.y+r.h) { if (cooldowns[i] <= 0 && mana >= SPELLS[i].cost) dragIdx = i; return; } } } }
+});
+cvs.addEventListener('pointermove', e => { const p = toLocal(e); mouse.x = p.x; mouse.y = p.y; });
+cvs.addEventListener('pointerup', e => { e.preventDefault(); if (!mouse.isDown) return; mouse.isDown = false; if (dragIdx >= 0) { const p = toLocal(e); if (p.y > CARD_TOP - 20) { dragIdx = -1; } else { castSpell(dragIdx, p.x, p.y); dragIdx = -1; } } });
+cvs.addEventListener('pointerleave', () => { mouse.x = -1; mouse.y = -1; dragIdx = -1; mouse.isDown = false; });
+window.addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+  if (k === ' ') { e.preventDefault(); if (state === 'playing') state = 'paused'; else if (state === 'paused') { state = 'playing'; last = performance.now(); } return; }
+  if (k === 'escape') { if (state === 'playing') state = 'paused'; else if (state === 'paused') { state = 'playing'; } else if (state === 'panel' || state === 'select_art') state = 'menu'; return; }
+  if (k === 'r') { if (state !== 'menu') state = 'menu'; return; }
+});
+document.addEventListener('visibilitychange', () => { if (document.hidden && state === 'playing') state = 'paused'; });
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', () => setTimeout(resize, 50));
+
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min((now - last) / 1000, 0.05); last = now; const t = now / 1000;
+  if (state === 'playing') update(dt);
+  render(t);
+  requestAnimationFrame(loop);
+}
+resetGame();
+resize();
+requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
